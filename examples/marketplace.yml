@@ -1,0 +1,57 @@
+# Copy to <skills-repo>/.github/workflows/marketplace.yml
+#
+# - PR:       validates SKILL.md files (no write)
+# - release:  writes the marketplace catalogs with version = tag and commits them to the default branch
+#             (prereleases are skipped: everyone reads the catalog from the default branch)
+name: marketplace
+
+on:
+  pull_request:
+    paths: ["**/skills/**"]
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag: { description: "Release tag, e.g. v1.2.0", required: true }
+  workflow_call: # lets a release-please style workflow call this after creating the release
+    inputs:
+      tag: { type: string, required: true }
+
+env:
+  CLI: github:nogikun/skill-mart#v1.0.0
+
+jobs:
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - run: npx -y "$CLI" --dry-run > /dev/null
+
+  sync:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    concurrency: marketplace
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      # Protected default branch? Create a GitHub App (Contents: write), add it to the ruleset bypass list,
+      # then uncomment this step and pass `token: ${{ steps.app.outputs.token }}` to checkout.
+      # - uses: actions/create-github-app-token@v2
+      #   id: app
+      #   with: { app-id: "${{ vars.APP_ID }}", private-key: "${{ secrets.APP_PRIVATE_KEY }}" }
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }} # a release checks out the tag (detached) otherwise
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - run: npx -y "$CLI" --version "$TAG"
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || { git commit -m "chore: sync marketplace to $TAG"; git push; }
