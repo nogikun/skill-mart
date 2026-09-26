@@ -1,0 +1,19 @@
+{
+  "name": "skill-mart",
+  "version": "1.0.0",
+  "description": "Generate Claude Code and Codex/ChatGPT marketplace.json from the skills in a repository",
+  "type": "module",
+  "bin": {
+    "skill-mart": "cli.mjs"
+  },
+  "files": [
+    "cli.mjs"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": "github:nogikun/skill-mart"
+}
