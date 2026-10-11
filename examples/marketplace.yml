@@ -1,8 +1,10 @@
 # Copy to <skills-repo>/.github/workflows/marketplace.yml
 #
 # - PR:       validates SKILL.md files (no write)
-# - release:  writes the marketplace catalogs with version = tag and commits them to the default branch
+# - release:  writes Claude, Codex / ChatGPT, Cursor and Copilot catalogs and commits them to the default branch
 #             (prereleases are skipped: everyone reads the catalog from the default branch)
+# - skills.sh: prints the GitHub install command; listing follows real user installs
+# - ClawHub:   publishes skills when CLAWHUB_PUBLISH=true and CLAWHUB_TOKEN is configured
 name: marketplace
 
 on:
@@ -16,9 +18,11 @@ on:
   workflow_call: # lets a release-please style workflow call this after creating the release
     inputs:
       tag: { type: string, required: true }
+    secrets:
+      CLAWHUB_TOKEN: { required: false }
 
 env:
-  CLI: github:nogikun/skill-mart#v1.0.0
+  CLI: github:nogikun/skill-mart#main # pin to a release containing multi-marketplace support once available
 
 jobs:
   check:
@@ -29,7 +33,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with: { node-version: 22 }
-      - run: npx -y "$CLI" --dry-run > /dev/null
+      - run: npx -y "$CLI" --require-name --dry-run > /dev/null
 
   sync:
     if: github.event_name != 'pull_request'
@@ -49,9 +53,32 @@ jobs:
           ref: ${{ github.event.repository.default_branch }} # a release checks out the tag (detached) otherwise
       - uses: actions/setup-node@v5
         with: { node-version: 22 }
-      - run: npx -y "$CLI" --version "$TAG"
-      - run: |
+      - run: npx -y "$CLI" --require-name --version "$TAG"
+      - name: Commit catalogs
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
+          # Publish all catalogs even if the repo ignores their directories.
+          git add -f -- .claude-plugin/marketplace.json .agents/plugins/marketplace.json .cursor-plugin/marketplace.json .github/plugin/marketplace.json
           git diff --cached --quiet || { git commit -m "chore: sync marketplace to $TAG"; git push; }
+      - name: Publish ClawHub skills
+        if: vars.CLAWHUB_PUBLISH == 'true'
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+        run: npx -y "$CLI" --require-name --version "$TAG" --publish-clawhub
+      - name: Distribution summary
+        env:
+          REPOSITORY: ${{ github.repository }}
+          CLAWHUB_ENABLED: ${{ vars.CLAWHUB_PUBLISH == 'true' }}
+        run: |
+          {
+            echo '## Skill distribution'
+            echo "Claude: \`/plugin marketplace add $REPOSITORY\`"
+            echo "Codex / ChatGPT: \`codex plugin marketplace add $REPOSITORY\`"
+            echo "Copilot: \`copilot plugin marketplace add $REPOSITORY\`"
+            echo "Cursor: import https://github.com/$REPOSITORY as a GitHub marketplace."
+            echo "skills.sh: \`npx skills add $REPOSITORY\` (listing follows user installs with telemetry enabled)."
+            echo 'Cursor public directory: separate submission and review at https://cursor.com/marketplace/publish.'
+            echo "ClawHub publication enabled: $CLAWHUB_ENABLED (configure CLAWHUB_PUBLISH and CLAWHUB_TOKEN to enable)."
+          } >> "$GITHUB_STEP_SUMMARY"

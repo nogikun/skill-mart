@@ -1,19 +1,21 @@
 #!/usr/bin/env node
 // Finds <plugin>/skills/<skill>/SKILL.md in a repo and writes marketplace catalogs for
-// Claude Code (.claude-plugin/marketplace.json) and Codex / ChatGPT (.agents/plugins/marketplace.json),
-// plus a portable <plugin>/plugin.json (agent-plugins.org), the manifest OpenAI documents for ChatGPT.
+// Claude, Codex / ChatGPT, Cursor and Copilot, plus portable Agent Plugins manifests.
 // A plugin is the directory that contains `skills/`; every client auto-loads that folder.
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 
-const USAGE = `Usage: skill-mart [dir] [--version X.Y.Z] [--owner NAME] [--dry-run]
+const USAGE = `Usage: skill-mart [dir] [--version X.Y.Z] [--owner NAME] [--dry-run] [--require-name] [--publish-clawhub]
 
   dir         repository root to scan (default: .)
   --version   plugin version to set, e.g. v1.2.0 from a release tag (default: keep existing)
   --owner     marketplace owner name (default: existing owner, then git remote owner)
-  --dry-run   validate and print the catalogs without writing`;
+  --dry-run   validate and print the catalogs without writing or publishing
+  --require-name   require skill names for distribution to all clients
+  --publish-clawhub   publish each skill via ClawHub (requires CLAWHUB_TOKEN)`;
 
 const { values: opts, positionals } = parseArgs({
   allowPositionals: true,
@@ -21,6 +23,8 @@ const { values: opts, positionals } = parseArgs({
     version: { type: 'string' },
     owner: { type: 'string' },
     'dry-run': { type: 'boolean' },
+    'require-name': { type: 'boolean' },
+    'publish-clawhub': { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
   },
 });
@@ -38,6 +42,9 @@ const die = (msg) => {
 
 const CLAUDE_PATH = '.claude-plugin/marketplace.json';
 const CODEX_PATH = '.agents/plugins/marketplace.json';
+const CURSOR_PATH = '.cursor-plugin/marketplace.json';
+const COPILOT_PATH = '.github/plugin/marketplace.json';
+const CLAWHUB_CLI = 'clawhub@0.23.3';
 const PORTABLE_SCHEMA = 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json';
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
 const dirs = (dir) =>
@@ -126,6 +133,8 @@ if (!found.length) die(`no skills/<name>/SKILL.md found under ${root}`);
 
 const oldClaude = readJson(CLAUDE_PATH);
 const oldCodex = readJson(CODEX_PATH);
+const oldCursor = readJson(CURSOR_PATH);
+const oldCopilot = readJson(COPILOT_PATH);
 const [remoteOwner, repo] = remoteOwnerRepo();
 const name = oldClaude.name ?? slug(repo); // never rename an existing marketplace: users' installs are keyed by it
 const ownerName = opts.owner ?? remoteOwner;
@@ -137,6 +146,10 @@ const plugins = found.map(({ dir, skills }) => {
     const file = `${dir ? `${dir}/` : ''}skills/${s}/SKILL.md`;
     const fm = parseFrontmatter(readFileSync(join(root, file), 'utf8'), file) ?? {};
     if (!fm.description) errors.push(`${file}: "description" is required`);
+    if (opts['require-name'] && !fm.name) errors.push(`${file}: "name" is required for distribution to all clients`);
+    if (opts['require-name'] && fm.name && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(fm.name)) {
+      errors.push(`${file}: "name" must use lowercase letters, numbers and single hyphens`);
+    }
     if (fm.name && fm.name !== s) errors.push(`${file}: name "${fm.name}" must match its directory "${s}"`);
     return fm.description;
   });
@@ -159,6 +172,19 @@ const manifests = found.map(({ dir }, i) => {
   const { source, ...fields } = plugins[i];
   return [rel, { $schema: PORTABLE_SCHEMA, ...old, ...fields }];
 });
+const clawhubSkills = opts['publish-clawhub'] ? found.flatMap(({ dir, skills }, i) =>
+  skills.map((skill) => ({
+    path: join(root, dir, 'skills', skill),
+    name: skill,
+    slug: slug([name, ...(dir ? [plugins[i].name] : []), skill].join('-')),
+  })),
+) : [];
+for (const [i, skill] of clawhubSkills.entries()) {
+  if (clawhubSkills.findIndex((s) => s.slug === skill.slug) !== i) errors.push(`duplicate ClawHub slug "${skill.slug}"`);
+}
+if (opts['publish-clawhub'] && !opts['dry-run'] && !process.env.CLAWHUB_TOKEN?.trim()) {
+  errors.push('--publish-clawhub requires CLAWHUB_TOKEN');
+}
 if (errors.length) die(`\n  ${errors.join('\n  ')}`);
 
 // Fields this tool writes always win; defaults lose to hand edits; unknown hand-added fields are kept.
@@ -167,6 +193,16 @@ const merge = (old = [], fresh, defaults) =>
   fresh.map((p) => ({ ...p, ...defaults, ...old.find((o) => o.name === p.name), ...p }));
 
 const claude = { ...oldClaude, name, owner, plugins: merge(oldClaude.plugins, plugins) };
+const cursor = {
+  ...oldCursor, name: oldCursor.name ?? name,
+  owner: opts.owner || !oldCursor.owner ? owner : oldCursor.owner,
+  plugins: merge(oldCursor.plugins, plugins),
+};
+const copilot = {
+  ...oldCopilot, name: oldCopilot.name ?? name,
+  owner: opts.owner || !oldCopilot.owner ? owner : oldCopilot.owner,
+  plugins: merge(oldCopilot.plugins, plugins),
+};
 const codex = {
   ...oldCodex,
   name: oldCodex.name ?? name,
@@ -178,7 +214,7 @@ const codex = {
   ),
 };
 
-for (const [rel, data] of [[CLAUDE_PATH, claude], [CODEX_PATH, codex], ...manifests]) {
+for (const [rel, data] of [[CLAUDE_PATH, claude], [CODEX_PATH, codex], [CURSOR_PATH, cursor], [COPILOT_PATH, copilot], ...manifests]) {
   const json = `${JSON.stringify(data, null, 2)}\n`;
   if (opts['dry-run']) {
     console.log(`# ${rel}\n${json}`);
@@ -189,3 +225,27 @@ for (const [rel, data] of [[CLAUDE_PATH, claude], [CODEX_PATH, codex], ...manife
   console.log(`wrote ${rel}`);
 }
 for (const p of plugins) console.log(`  ${p.name}  ${p.source}${version ? `  v${version}` : ''}`);
+
+if (clawhubSkills.length) {
+  if (opts['dry-run']) {
+    for (const skill of clawhubSkills) console.log(`would publish to ClawHub: ${skill.slug}  ${skill.path}`);
+  } else {
+    const configDir = mkdtempSync(join(tmpdir(), 'skill-mart-clawhub-'));
+    try {
+      const config = join(configDir, 'config.json');
+      writeFileSync(config, JSON.stringify({ registry: 'https://clawhub.ai', token: process.env.CLAWHUB_TOKEN }), { mode: 0o600 });
+      for (const skill of clawhubSkills) {
+        // ClawHub versions only changed content, so retrying a workflow does not republish it.
+        execFileSync('npx', ['--yes', CLAWHUB_CLI, '--no-input', 'skill', 'publish', skill.path,
+          '--slug', skill.slug, '--name', skill.name,
+          '--changelog', version ? `Sync from release v${version}` : 'Sync from skill-mart',
+        ], { cwd: root, env: { ...process.env, CLAWHUB_CONFIG_PATH: config }, stdio: 'inherit' });
+      }
+    } catch {
+      console.error('error: ClawHub publication failed; earlier skills may have been published. Fix the error and rerun.');
+      process.exitCode = 1;
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  }
+}
