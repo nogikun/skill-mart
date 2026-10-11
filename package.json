@@ -1,7 +1,7 @@
 {
   "name": "skill-mart",
   "version": "1.0.0",
-  "description": "Generate Claude Code and Codex/ChatGPT marketplace.json from the skills in a repository",
+  "description": "Generate Claude, Codex/ChatGPT, Cursor and Copilot catalogs and publish skills to ClawHub",
   "type": "module",
   "bin": {
     "skill-mart": "cli.mjs"
